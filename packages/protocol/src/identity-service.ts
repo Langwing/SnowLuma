@@ -625,7 +625,6 @@ export class IdentityService {
     }
     this.runWrite('group requests', () => this.transaction(() => {
       for (const request of observed) {
-        this.upsertGroup({ groupId: request.groupId, groupName: request.groupName });
         this.upsertUser({
           uid: request.targetUid,
           uin: request.targetUin,
@@ -655,7 +654,6 @@ export class IdentityService {
     const observed = { ...identity };
     this.rememberUidUin(observed.uid, observed.uin);
     this.runWrite('request identity', () => this.transaction(() => {
-      if (observed.groupId !== undefined) this.upsertGroup({ groupId: observed.groupId });
       this.upsertUser({
         uid: observed.uid,
         uin: observed.uin,
@@ -666,18 +664,49 @@ export class IdentityService {
   }
 
   rememberGroupMemberIdentity(
-    groupId: number,
+    _groupId: number,
     identity: { uid?: string; uin?: number; nickname?: string; card?: string },
   ): void {
     this.beginObservation('group member identity');
     const observed = { ...identity };
     this.rememberUidUin(observed.uid, observed.uin);
-    this.runWrite('group member identity', () => this.transaction(() => this.upsertGroupMember({
-      groupId,
+    this.runWrite('group member identity', () => this.transaction(() => this.upsertUser({
       uid: observed.uid,
       uin: observed.uin,
       nickname: observed.nickname,
-      card: observed.card,
+      source: 'group_member',
+    })));
+  }
+
+  /** Live 花名册: the joiner is in this group now. Does not invent card/role/isRobot.
+   *  No-op when the UIN is missing, the group is unknown, or the member is already present. */
+  rememberGroupMemberJoined(
+    groupId: number,
+    identity: { uid?: string; uin?: number },
+  ): void {
+    this.beginObservation('group member joined');
+    const uin = normalizeUin(identity.uin);
+    if (uin === null) return;
+    const g = this.groups_.get(groupId);
+    if (!g || g.members.has(uin)) return;
+    const uid = normalizeUid(identity.uid) ?? '';
+    this.rememberUidUin(uid, uin);
+    const joined: GroupMemberInfo = {
+      uin,
+      uid,
+      nickname: '',
+      card: '',
+      role: 'member',
+      level: 0,
+      title: '',
+      joinTime: 0,
+      lastSentTime: 0,
+      shutUpTime: 0,
+    };
+    g.members.set(uin, joined);
+    this.runWrite('group member joined', () => this.transaction(() => this.upsertGroupMember({
+      groupId,
+      ...joined,
       active: true,
     })));
   }
@@ -685,9 +714,17 @@ export class IdentityService {
   markGroupMemberInactive(groupId: number, identity: { uid?: string; uin?: number }): void {
     this.beginObservation('group member inactive');
     const observed = { ...identity };
+    const uid = normalizeUid(observed.uid);
+    const uin = normalizeUin(observed.uin);
+    const g = this.groups_.get(groupId);
+    if (g) {
+      if (uin !== null) g.members.delete(uin);
+      else if (uid) {
+        const member = this.findGroupMemberByUid(groupId, uid);
+        if (member) g.members.delete(member.uin);
+      }
+    }
     this.runWrite('group member inactive', () => {
-      const uid = normalizeUid(observed.uid);
-      const uin = normalizeUin(observed.uin);
       if (!uid && uin === null) return;
       const rows = this.findMemberRows(groupId, uid, uin);
       const updatedAt = nowSeconds();

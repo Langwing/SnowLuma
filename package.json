@@ -1,7 +1,7 @@
 {
   "license": "SEE LICENSE IN LICENSE",
   "name": "snowluma-monorepo",
-  "version": "1.14.14",
+  "version": "1.14.19",
   "description": "SnowLuma monorepo workspace (pnpm)",
   "private": true,
   "type": "module",
@@ -25,6 +25,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "ci": "node tools/ci-check.mjs",
     "start": "node dist/index.mjs",
     "bump": "node tools/bump-version.mjs",
     "release": "node tools/release.mjs"
@@ -50,7 +51,15 @@
     },
     "overrides": {
       "esbuild@<0.28.1": "^0.28.1",
-      "@babel/core@<7.29.6": "^7.29.6"
+      "@babel/core@<7.29.6": "^7.29.6",
+      "qs@<=6.15.3": "^6.16.0",
+      "fast-uri@<3.1.6": "^3.1.6",
+      "@hono/node-server@<1.19.15": "^1.19.15",
+      "hono": "~4.12.34",
+      "postcss@<=8.5.22": "^8.5.23",
+      "ip-address@<=10.3.0": "^10.3.1",
+      "body-parser@<2.3.0": "^2.3.0",
+      "brace-expansion@<5.0.7": "^5.0.7"
     }
   },
   "packageManager": "pnpm@10.28.0",

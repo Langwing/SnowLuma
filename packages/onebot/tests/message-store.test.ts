@@ -867,6 +867,67 @@ describe('MessageStore', () => {
     });
   });
 
+  describe('resolvePrivateReplyMessageId', () => {
+    const peerId = 2705892349;
+    const sendId = -12721351;
+    const sentAt = 1_788_102_428;
+
+    function storeOutgoing(clientSequence: number, direction: 'incoming' | 'outgoing' = 'outgoing') {
+      store.storeMeta(sendId, {
+        isGroup: false,
+        targetId: peerId,
+        sequence: 682,
+        sequenceAuthoritative: true,
+        eventName: PRIVATE_MESSAGE_EVENT,
+        clientSequence,
+        privateDirection: direction,
+        random: 1,
+        timestamp: sentAt,
+      });
+    }
+
+    it('returns the send id when the quote sequence matches the stored client sequence', () => {
+      storeOutgoing(27_892);
+      expect(store.resolvePrivateReplyMessageId(peerId, 27_892, true, sentAt)).toBe(sendId);
+    });
+
+    it('returns the send id by timestamp when the quote sequence is not the local client sequence', () => {
+      storeOutgoing(201_616_628);
+      expect(store.resolvePrivateReplyMessageId(peerId, 27_892, true, sentAt)).toBe(sendId);
+    });
+
+    it('does not use timestamp fallback for incoming quotes', () => {
+      storeOutgoing(201_616_628, 'incoming');
+      expect(store.resolvePrivateReplyMessageId(peerId, 27_892, false, sentAt)).toBeNull();
+    });
+
+    it('returns the send id when the quote sequence matches the stored conversation sequence', () => {
+      storeOutgoing(201_616_628);
+      expect(store.resolvePrivateReplyMessageId(peerId, 682, true, sentAt + 2)).toBe(sendId);
+    });
+
+    it('returns the send id when the quote time drifts a few seconds from the send receipt', () => {
+      storeOutgoing(201_616_628);
+      expect(store.resolvePrivateReplyMessageId(peerId, 27_892, true, sentAt + 2)).toBe(sendId);
+    });
+
+    it('does not guess by time when two outgoing messages share the quote window', () => {
+      storeOutgoing(201_616_628);
+      store.storeMeta(sendId + 1, {
+        isGroup: false,
+        targetId: peerId,
+        sequence: 683,
+        sequenceAuthoritative: true,
+        eventName: PRIVATE_MESSAGE_EVENT,
+        clientSequence: 201_616_629,
+        privateDirection: 'outgoing',
+        random: 2,
+        timestamp: sentAt + 1,
+      });
+      expect(store.resolvePrivateReplyMessageId(peerId, 27_892, true, sentAt + 2)).toBeNull();
+    });
+  });
+
   it('lets a real group event replace an older non-authoritative placeholder', () => {
     const groupId = 123456;
     store.storeEvent(123, true, groupId, 99, GROUP_MESSAGE_EVENT, {

@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type {
   DeleteMediasRequest,
   DeleteMediasResponse,
+  DoQunCommentRequest,
+  DoQunCommentResponse,
   GetAlbumListResponse,
   GetMediaListResponse,
+  GetQunFeedDetailRequest,
+  GetQunFeedDetailResponse,
+  QunFeedCellCommon,
 } from '@snowluma/proto-defs/oidb-actions/group-album';
 import { protobuf_decode, protobuf_encode } from '@snowluma/proton';
 import { GroupAlbumApi } from '../../src/bridge/apis/group-album';
@@ -562,5 +567,378 @@ describe('apis/group-album', () => {
     const request = protobuf_decode<DeleteMediasRequest>(deleteCall![1] as Uint8Array);
     expect(request.body?.mediaIds).toEqual(['unknown-id']);
     expect(request.body?.batchIds ?? []).toEqual([]);
+  });
+
+  function packCommentOk(comment: DoQunCommentResponse['comment']): ReturnType<typeof packDeleteOk> {
+    return {
+      success: true,
+      gotResponse: true,
+      errorCode: 0,
+      errorMessage: '',
+      responseData: Buffer.from(protobuf_encode<DoQunCommentResponse>({
+        field1: 8527,
+        comment,
+      })),
+    };
+  }
+
+  function packFeedDetail(
+    feedId = 'official-feed-id',
+    time = 1700000123n,
+    extra: {
+      ownerUin?: string;
+      cellCommon?: Omit<QunFeedCellCommon, 'time' | 'feedId'>;
+      cellMedia?: {
+        medias?: Array<{ type?: number; image?: { lloc?: string }; video?: { cover?: { lloc?: string } } }>;
+        albumId?: string;
+        batchId?: bigint;
+      };
+    } = {},
+  ): ReturnType<typeof packDeleteOk> {
+    return {
+      success: true,
+      gotResponse: true,
+      errorCode: 0,
+      errorMessage: '',
+      responseData: Buffer.from(protobuf_encode<GetQunFeedDetailResponse>({
+        result: 0,
+        data: {
+          feed: {
+            feed: {
+              cellCommon: { time, feedId, ...extra.cellCommon },
+              ...(extra.ownerUin ? { cellUserInfo: { user: { uin: extra.ownerUin } } } : {}),
+              ...(extra.cellMedia ? { cellMedia: extra.cellMedia } : {}),
+            },
+          },
+        },
+      })),
+    };
+  }
+
+  function packPhotoMedia(lloc = 'photo-lloc', batchId = 77n) {
+    return packMediaList({
+      mediaList: [{ type: 1, image: { lloc }, batchId }],
+    });
+  }
+
+  function commentMocks(
+    extra: (cmd: string) => ReturnType<typeof packDeleteOk> | undefined = () => undefined,
+  ) {
+    return async (cmd: string) => {
+      const override = extra(cmd);
+      if (override) return override;
+      if (cmd.endsWith('GetMediaList')) return packPhotoMedia();
+      if (cmd.endsWith('GetQunFeedDetail')) {
+        return packFeedDetail('official-feed-id', 1700000123n, {
+          ownerUin: '3119936551',
+          cellCommon: {
+            type: 422,
+            cellId: '421_1_0_12345|album-id|77^||^421_1_0_12345|album-id|photo-lloc^||^0',
+            field6: 3,
+          },
+        });
+      }
+      return packCommentOk({
+        data: {
+          id: 'cmt-1',
+          user: { uin: '10001' },
+          content: [{ type: 0, content: 'hello' }],
+          time: 1700000000n,
+          clientKey: 'ck',
+        },
+      });
+    };
+  }
+
+  function commentCallBytes(bridge: ReturnType<typeof mockBridge>): Uint8Array {
+    const commentCall = bridge.sendRawPacket.mock.calls.find((call) =>
+      String(call[0]).endsWith('DoQunComment'),
+    );
+    expect(commentCall?.[0]).toBe(
+      'QunAlbum.trpc.qzone.webapp_qun_operation.FeedsWriter.DoQunComment',
+    );
+    return commentCall![1] as Uint8Array;
+  }
+
+  function commentRequestOf(bridge: ReturnType<typeof mockBridge>): DoQunCommentRequest {
+    return protobuf_decode<DoQunCommentRequest>(commentCallBytes(bridge));
+  }
+
+  function feedDetailRequestOf(bridge: ReturnType<typeof mockBridge>): GetQunFeedDetailRequest {
+    const feedCall = bridge.sendRawPacket.mock.calls.find((call) =>
+      String(call[0]).endsWith('GetQunFeedDetail'),
+    );
+    expect(feedCall?.[0]).toBe(
+      'QunAlbum.trpc.qzone.webapp_qun_feeds.FeedsReader.GetQunFeedDetail',
+    );
+    return protobuf_decode<GetQunFeedDetailRequest>(feedCall![1] as Uint8Array);
+  }
+
+  it('looks up the official feed then comments with its header and slim photo cell', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks());
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .resolves.toEqual({
+        id: 'cmt-1',
+        user: { uin: '10001' },
+        content: [{ type: 0, content: 'hello' }],
+        time: '1700000000',
+        clientKey: 'ck',
+      });
+
+    expect(feedDetailRequestOf(bridge).data).toMatchObject({
+      groupId: '12345',
+      commentCount: 20,
+      albumId: 'album-id',
+      batchId: '77',
+      lloc: 'photo-lloc',
+    });
+    expect(feedDetailRequestOf(bridge).data?.feedId ?? '').toBe('');
+    expect(feedDetailRequestOf(bridge).data?.attachInfo ?? '').toBe('');
+
+    const request = commentRequestOf(bridge);
+    expect(request.field1).toBe(8527);
+    expect(request.body).toMatchObject({
+      groupId: '12345',
+      field3: 2,
+      reqBody: {
+        field1: {
+          time: 1700000123n,
+          feedId: 'official-feed-id',
+        },
+        field2: { field1: { uin: '3119936551' } },
+        field5: {
+          albumId: 'album-id',
+          batchId: 77n,
+          medias: [{
+            image: { lloc: 'photo-lloc' },
+          }],
+        },
+      },
+      field5: {
+        user: { uin: '10001' },
+        contents: [{ content: 'hello' }],
+      },
+    });
+    expect(request.body?.reqBody?.field5?.medias?.[0]?.type ?? 0).toBe(0);
+    expect(Buffer.from(commentCallBytes(bridge)).subarray(0, 7).toString('hex'))
+      .toBe('08cf4212001a00');
+  });
+
+  it('falls back to the media uploader when the official feed has no owner cell', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetMediaList')) {
+        return packMediaList({
+          mediaList: [{ type: 1, image: { lloc: 'photo-lloc' }, batchId: 77n, uploader: '3119936551' }],
+        });
+      }
+      if (cmd.endsWith('GetQunFeedDetail')) return packFeedDetail();
+      return undefined;
+    }));
+
+    await new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello');
+
+    expect(commentRequestOf(bridge).body?.reqBody?.field2?.field1?.uin).toBe('3119936551');
+    expect(commentRequestOf(bridge).body?.field5?.user?.uin).toBe('10001');
+  });
+
+  it('copies the official feed media cell instead of a reconstructed lloc-only cell', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetQunFeedDetail')) {
+        return packFeedDetail('official-feed-id', 1700000123n, {
+          ownerUin: '3119936551',
+          cellMedia: {
+            albumId: 'feed-album',
+            batchId: 88n,
+            medias: [{
+              type: 0,
+              image: { lloc: 'feed-lloc' },
+            }],
+          },
+        });
+      }
+      return undefined;
+    }));
+
+    await new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello');
+
+    expect(commentRequestOf(bridge).body?.reqBody?.field5).toMatchObject({
+      albumId: 'feed-album',
+      batchId: 88n,
+      medias: [{
+        image: { lloc: 'feed-lloc' },
+      }],
+    });
+  });
+
+  it('writes only the official comment header fields even when the feed cell has extra locator data', async () => {
+    const cellId = '421_1_0_964445447|album-id|2147483665^||^421_1_0_964445447|album-id|photo-lloc^||^0';
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetQunFeedDetail')) {
+        return packFeedDetail('422_0_2147483665', 1789315793n, {
+          ownerUin: '3119936551',
+          cellCommon: { type: 422, cellId, field6: 3 },
+        });
+      }
+      return undefined;
+    }));
+
+    await new GroupAlbumApi(bridge as never).comment(964445447, 'album-id', 'photo-lloc', 'hello');
+
+    expect(commentRequestOf(bridge).body?.reqBody?.field1).toMatchObject({
+      time: 1789315793n,
+      feedId: '422_0_2147483665',
+    });
+    expect(commentRequestOf(bridge).body?.reqBody?.field1?.type ?? 0).toBe(0);
+    expect(commentRequestOf(bridge).body?.reqBody?.field1?.cellId ?? '').toBe('');
+    expect(commentRequestOf(bridge).body?.reqBody?.field1?.field6 ?? 0).toBe(0);
+  });
+
+  it('comments a video with the cover location and video media type', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetMediaList')) {
+        return packMediaList({
+          mediaList: [{
+            type: 2,
+            video: { id: 'video-id', cover: { lloc: 'cover-lloc' } },
+            batchId: 88n,
+          }],
+        });
+      }
+      return undefined;
+    }));
+
+    await new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'video-id', 'hello');
+
+    expect(feedDetailRequestOf(bridge).data?.lloc).toBe('cover-lloc');
+    expect(commentRequestOf(bridge).body?.reqBody?.field5).toMatchObject({
+      albumId: 'album-id',
+      batchId: 88n,
+      medias: [{
+        type: 1,
+        video: { cover: { lloc: 'cover-lloc' } },
+      }],
+    });
+  });
+
+  it('rejects a comment when the album media cannot be resolved', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetMediaList')) return packMediaList({ mediaList: [] });
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'missing-lloc', 'hello'))
+      .rejects.toThrow('comment album media error: media not found');
+    expect(bridge.sendRawPacket.mock.calls.some((call) => String(call[0]).endsWith('DoQunComment')))
+      .toBe(false);
+  });
+
+  it('rejects a comment when the official feed lookup fails', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetQunFeedDetail')) {
+        return {
+          success: true,
+          gotResponse: true,
+          errorCode: 0,
+          errorMessage: '',
+          responseData: Buffer.from(protobuf_encode<GetQunFeedDetailResponse>({
+            result: 10016,
+            errorText: '服务器繁忙',
+          })),
+        };
+      }
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .rejects.toThrow('fetch album feed error: retCode 10016, 服务器繁忙');
+    expect(bridge.sendRawPacket.mock.calls.some((call) => String(call[0]).endsWith('DoQunComment')))
+      .toBe(false);
+  });
+
+  it('rejects a comment when the official feed has no id', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('GetQunFeedDetail')) return packFeedDetail('');
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .rejects.toThrow('comment album media error: empty feed');
+    expect(bridge.sendRawPacket.mock.calls.some((call) => String(call[0]).endsWith('DoQunComment')))
+      .toBe(false);
+  });
+
+  it('rejects a seq-echo 8527 packet that has no comment body', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('DoQunComment')) {
+        return {
+          success: true,
+          gotResponse: true,
+          errorCode: 0,
+          errorMessage: '',
+          responseData: Buffer.from(protobuf_encode<DoQunCommentResponse>({ field1: 8527 })),
+        };
+      }
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .rejects.toThrow('comment album media error: empty comment');
+  });
+
+  it('surfaces the album result code instead of treating seq 8527 as success', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('DoQunComment')) {
+        return {
+          success: true,
+          gotResponse: true,
+          errorCode: 0,
+          errorMessage: '',
+          responseData: Buffer.from(protobuf_encode<DoQunCommentResponse>({
+            field1: 8527,
+            result: 1001,
+            errorText: 'permission denied',
+          })),
+        };
+      }
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .rejects.toThrow('comment album media error: retCode 1001, permission denied');
+  });
+
+  it('accepts a comment written directly on envelope field 4', async () => {
+    const bridge = mockBridge();
+    bridge.sendRawPacket.mockImplementation(commentMocks((cmd) => {
+      if (cmd.endsWith('DoQunComment')) {
+        return packCommentOk({
+          id: 'flat-id',
+          content: [{ type: 0, content: 'hello' }],
+          time: 123n,
+          clientKey: 'ck',
+        });
+      }
+      return undefined;
+    }));
+
+    await expect(new GroupAlbumApi(bridge as never).comment(12345, 'album-id', 'photo-lloc', 'hello'))
+      .resolves.toMatchObject({
+        id: 'flat-id',
+        user: { uin: '10001' },
+        content: [{ type: 0, content: 'hello' }],
+        time: '123',
+        clientKey: 'ck',
+      });
   });
 });

@@ -12,18 +12,12 @@ import type {
   SetStatusResp,
 } from '@snowluma/proto-defs/oidb-actions/base';
 
-// `encodeOidbEnv` / `decodeOidbEnv` are proton-bound pass-through wrappers
-// (substituted at the call site with the inlined codec). Mocking them on
-// the module object is a no-op — proton has already inlined the call.
-// We mock `runOidb` (non-generic) to return real proton-encoded bytes
-// that the production-side codec actually decodes.
 vi.mock('@snowluma/protocol/bridge-oidb', async () => {
   const actual = await vi.importActual<typeof import('@snowluma/protocol/bridge-oidb')>(
     '@snowluma/protocol/bridge-oidb',
   );
   return {
     ...actual,
-    runOidb: vi.fn(async () => new Uint8Array()),
     makeOidbEnvelope: vi.fn((_oidbCmd, _subCmd, body) => ({ body })),
   };
 });
@@ -47,8 +41,6 @@ import { mockBridge } from './_helpers';
 
 describe('apis/profile', () => {
   beforeEach(() => {
-    vi.mocked(oidb.runOidb).mockReset();
-    vi.mocked(oidb.runOidb).mockResolvedValue(new Uint8Array());
     vi.mocked(oidb.makeOidbEnvelope).mockClear();
     vi.mocked(highwayClient.fetchHighwaySession).mockClear();
     vi.mocked(highwayClient.uploadHighwayHttp).mockClear();
@@ -298,6 +290,94 @@ describe('apis/profile', () => {
     });
     const out = await new ProfileApi(bridge as any).getUnidirectionalFriendList();
     expect(out).toEqual([{ uin: 10001 }, { uin: 10002 }]);
+  });
+
+  it('fetchCustomFaceIds slices the Faceroam list and skips the packet for count=0', async () => {
+    const bridge = mockBridge();
+    const emojiA = '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0';
+    const emojiB = '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0';
+    bridge.sendRawPacket.mockResolvedValueOnce({
+      success: true,
+      gotResponse: true,
+      errorCode: 0,
+      errorMessage: '',
+      responseData: Buffer.from(protobuf_encode<FaceroamOpResp>({
+        retCode: 0,
+        item: { faceIds: [emojiA, emojiB] },
+      })),
+    } as any);
+
+    const api = new ProfileApi(bridge as any);
+    await expect(api.fetchCustomFaceIds(1)).resolves.toEqual([emojiA]);
+    expect(bridge.sendRawPacket.mock.calls[0]![0]).toBe('Faceroam.OpReq');
+
+    await expect(api.fetchCustomFaceIds(0)).resolves.toEqual([]);
+    expect(bridge.sendRawPacket).toHaveBeenCalledOnce();
+  });
+
+  it('fetchCustomFace maps ids to image urls', async () => {
+    const bridge = mockBridge();
+    const emojiA = '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0';
+    bridge.sendRawPacket.mockResolvedValueOnce({
+      success: true,
+      gotResponse: true,
+      errorCode: 0,
+      errorMessage: '',
+      responseData: Buffer.from(protobuf_encode<FaceroamOpResp>({
+        retCode: 0,
+        item: { faceIds: [emojiA] },
+      })),
+    } as any);
+
+    await expect(new ProfileApi(bridge as any).fetchCustomFace(1)).resolves.toEqual([
+      `https://p.qpic.cn/qq_expression/10001/${emojiA}/0`,
+    ]);
+  });
+
+  it('rejects a negative custom-face count before sending', async () => {
+    const bridge = mockBridge();
+    await expect(new ProfileApi(bridge as any).fetchCustomFaceIds(-1)).rejects.toThrow(
+      /non-negative integer/,
+    );
+    expect(bridge.sendRawPacket).not.toHaveBeenCalled();
+  });
+
+  it('moveCustomFaceToFront reorders from the id list without parsing urls', async () => {
+    const bridge = mockBridge();
+    const emojiA = '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0';
+    const emojiB = '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0';
+    bridge.sendRawPacket
+      .mockResolvedValueOnce({
+        success: true,
+        gotResponse: true,
+        errorCode: 0,
+        errorMessage: '',
+        responseData: Buffer.from(protobuf_encode<FaceroamOpResp>({
+          retCode: 0,
+          item: { faceIds: [emojiA, emojiB] },
+        })),
+      } as any)
+      .mockResolvedValue({
+        success: true,
+        gotResponse: true,
+        errorCode: 0,
+        errorMessage: '',
+        responseData: Buffer.from(protobuf_encode<OidbBase<CustomFaceModifyResp>>({
+          body: { retCode: 0 },
+        })),
+      } as any);
+
+    await new ProfileApi(bridge as any).moveCustomFaceToFront(emojiB);
+
+    expect(bridge.sendRawPacket.mock.calls.map((call) => call[0])).toEqual([
+      'Faceroam.OpReq',
+      'OidbSvcTrpcTcp.0x902f_1',
+      'OidbSvcTrpcTcp.0x902e_1',
+    ]);
+    const moveBody = protobuf_decode<OidbBase<CustomFaceMoveBody>>(
+      bridge.sendRawPacket.mock.calls[2]![1],
+    );
+    expect(moveBody.body?.emojis?.map((emoji) => emoji.emojiId)).toEqual([emojiB, emojiA]);
   });
 
   it('fetchCustomFaceDetails supplements the Faceroam ids with server descriptions (#333)', async () => {

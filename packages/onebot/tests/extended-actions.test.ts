@@ -61,6 +61,7 @@ const APIS_ROUTING: Record<string, [string, string]> = {
   setAvatar: ['profile', 'setAvatar'],
   setGroupAvatar: ['profile', 'setGroupAvatar'],
   fetchCustomFace: ['profile', 'fetchCustomFace'],
+  fetchCustomFaceIds: ['profile', 'fetchCustomFaceIds'],
   fetchCustomFaceDetails: ['profile', 'fetchCustomFaceDetails'],
   getProfileLike: ['profile', 'getLike'],
   getUnidirectionalFriendList: ['profile', 'getUnidirectionalFriendList'],
@@ -147,6 +148,50 @@ function fakeEssenceMessage(
     ...overrides,
   };
 }
+
+describe('extended-actions / send_forward_msg', () => {
+  it('treats group_id 0 as unused', async () => {
+    const sendForwardMsg = vi.fn(async () => ({ forwardId: 'fwd' }));
+    const ctx = fakeCtx(fakeBridge(), { sendForwardMsg });
+    const response = await makeHandler(ctx).handle('send_forward_msg', {
+      messages: 'hi',
+      group_id: 0,
+    });
+    expect(response).toMatchObject({ status: 'ok', retcode: 0 });
+    expect(sendForwardMsg).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a non-numeric group_id instead of treating it as 0', async () => {
+    const sendForwardMsg = vi.fn();
+    const ctx = fakeCtx(fakeBridge(), { sendForwardMsg });
+    const response = await makeHandler(ctx).handle('send_forward_msg', {
+      messages: 'hi',
+      group_id: 'nope',
+    });
+    expect(response).toMatchObject({ status: 'failed', retcode: 1400 });
+    expect(sendForwardMsg).not.toHaveBeenCalled();
+  });
+});
+
+describe('extended-actions / get_forward_msg', () => {
+  it('uses a string message_id as the forward id', async () => {
+    const getForwardMsg = vi.fn(async () => []);
+    const ctx = fakeCtx(fakeBridge(), { getForwardMsg });
+    const response = await makeHandler(ctx).handle('get_forward_msg', { message_id: 'resid-1' });
+    expect(getForwardMsg).toHaveBeenCalledWith('resid-1');
+    expect(response).toMatchObject({ status: 'ok' });
+  });
+});
+
+describe('extended-actions / fetch_ptt_text', () => {
+  it('accepts a numeric message_id', async () => {
+    const fetchPttText = vi.fn(async () => 'hello');
+    const ctx = fakeCtx(fakeBridge(), { fetchPttText });
+    const response = await makeHandler(ctx).handle('fetch_ptt_text', { message_id: 12 });
+    expect(fetchPttText).toHaveBeenCalledWith(12);
+    expect(response).toMatchObject({ status: 'ok', data: 'hello' });
+  });
+});
 
 describe('extended-actions / set_self_longnick', () => {
   it('accepts an empty longNick to clear the signature', async () => {
@@ -444,26 +489,48 @@ describe('extended-actions / get_essence_msg_list', () => {
     expect(cacheMessageMetas).not.toHaveBeenCalled();
   });
 
-  it('fails explicitly when QQ returns an unknown digest content type', async () => {
+  it('degrades unknown digest content types to text instead of failing the list', async () => {
     const getEssenceAll = vi.fn(async () => [{
       retcode: 0,
       data: {
         is_end: true,
-        msg_list: [fakeEssenceMessage({
-          msg_content: [{ msg_type: 99 }],
-        })],
+        msg_list: [
+          fakeEssenceMessage(),
+          fakeEssenceMessage({
+            msg_seq: 31416,
+            msg_content: [{
+              msg_type: 5,
+              share_title: '茶百道换换乐统计',
+              share_summary: '腾讯文档',
+              share_brief: '[腾讯文档] 茶百道换换乐统计',
+              share_url: 'https://docs.qq.com/sheet/example',
+            }],
+          }),
+          fakeEssenceMessage({
+            msg_seq: 31417,
+            msg_content: [{ msg_type: 99 }],
+          }),
+        ],
       },
     }]);
+    const cacheMessageMetas = vi.fn();
     const bridge = fakeBridge({ apis: { web: { getEssenceAll } } });
 
-    const response = await makeHandler(fakeCtx(bridge))
+    const response = await makeHandler(fakeCtx(bridge, { cacheMessageMetas }))
       .handle('get_essence_msg_list', { group_id: 123456789 });
 
-    expect(response).toMatchObject({
-      status: 'failed',
-      retcode: 100,
-      wording: expect.stringContaining('unsupported group essence content type: 99'),
-    });
+    expect(response).toMatchObject({ status: 'ok', retcode: 0 });
+    const rows = response.data as JsonObject[];
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.content).toEqual([{ type: 'text', data: { text: 'hello essence' } }]);
+    expect(rows[1]?.content).toEqual([{
+      type: 'text',
+      data: {
+        text: '[腾讯文档] 茶百道换换乐统计\n茶百道换换乐统计\n腾讯文档\nhttps://docs.qq.com/sheet/example',
+      },
+    }]);
+    expect(rows[2]?.content).toEqual([{ type: 'text', data: { text: '[essence type 99]' } }]);
+    expect(cacheMessageMetas).toHaveBeenCalledOnce();
   });
 
   it('does not cache message metadata when projection fails', async () => {
@@ -495,7 +562,7 @@ describe('extended-actions / get_essence_msg_list', () => {
           fakeEssenceMessage(),
           fakeEssenceMessage({
             msg_seq: 31416,
-            msg_content: [{ msg_type: 99 }],
+            add_digest_uin: 'not-a-uin',
           }),
         ],
       },
@@ -1483,6 +1550,45 @@ describe('extended-actions / set_group_portrait', () => {
       group_id: 1, file: 'x.png',
     });
     expect(res).toMatchObject({ status: 'failed', retcode: 100, wording: 'highway 500' });
+  });
+});
+
+describe('extended-actions / fetch_custom_face', () => {
+  it('return_type=id uses the id list directly', async () => {
+    const fetchCustomFaceIds = vi.fn(async () => [
+      '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0',
+      '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0',
+    ]);
+    const fetchCustomFace = vi.fn();
+    const bridge = fakeBridge({ fetchCustomFaceIds, fetchCustomFace });
+
+    const response = await makeHandler(fakeCtx(bridge)).handle('fetch_custom_face', {
+      count: '2',
+      return_type: 'id',
+    });
+
+    expect(fetchCustomFaceIds).toHaveBeenCalledWith(2);
+    expect(fetchCustomFace).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      status: 'ok',
+      data: [
+        '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0',
+        '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0',
+      ],
+    });
+  });
+
+  it('default return_type uses image urls', async () => {
+    const url = 'https://p.qpic.cn/qq_expression/10001/id/0';
+    const fetchCustomFace = vi.fn(async () => [url]);
+    const fetchCustomFaceIds = vi.fn();
+    const bridge = fakeBridge({ fetchCustomFace, fetchCustomFaceIds });
+
+    const response = await makeHandler(fakeCtx(bridge)).handle('fetch_custom_face', { count: '1' });
+
+    expect(fetchCustomFace).toHaveBeenCalledWith(1);
+    expect(fetchCustomFaceIds).not.toHaveBeenCalled();
+    expect(response).toMatchObject({ status: 'ok', data: [url] });
   });
 });
 
